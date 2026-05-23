@@ -75,7 +75,7 @@ function resolveVoiceId(voiceOverride: string | null | undefined, fallback: stri
 /**
  * 69labs MiniMax TTS — the primary voiceover engine for Conveyer Hum.
  *
- * The user picks a MiniMax catalog voice (e.g. "English_CalmWoman") or a cloned
+ * The user picks a MiniMax catalog voice (e.g. "English_Comedian") or a cloned
  * voice in the 69labs dashboard → MiniMax, then pastes that voice id into
  * /settings (TTS_VOICE_ID). A channel profile can override it per channel.
  * MiniMax runs over the same 69labs gateway + multi-key pool as Grok video, so
@@ -94,7 +94,7 @@ async function minimaxTts(
   if (!voiceId) {
     throw new Error(
       "No MiniMax voice set — paste a voice id into /settings → TTS_VOICE_ID " +
-        "(e.g. English_CalmWoman), or add one to the channel profile in /prompts"
+        "(e.g. English_Comedian), or add one to the channel profile in /prompts"
     );
   }
   const modelId = getSetting("TTS_MODEL") || "speech-02-hd";
@@ -123,7 +123,18 @@ async function minimaxTts(
       `speed=${minimaxSettings.speed ?? "default"}, lang=${minimaxSettings.languageBoost ?? "auto"})`,
     { stage: "tts" }
   );
-  await pollJob("tts", jobId, runId, "tts");
+  try {
+    await pollJob("tts", jobId, runId, "tts");
+  } catch (e) {
+    // MiniMax accepts the job request even when voice id / model id are invalid,
+    // then fails it during processing. Re-throw with a hint so the user knows
+    // exactly where to look.
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `${msg} — most often this means the MiniMax voice id "${voiceId}" or model "${modelId}" is not valid for this account. ` +
+        `Open the Voiceover tab in the app to browse the live MiniMax catalog and pick a working voice, then save it as TTS_VOICE_ID.`
+    );
+  }
   await downloadJob("tts", jobId, outPath);
 }
 

@@ -426,14 +426,31 @@ export async function pollJob(
       }
       throw new Error(`69labs status ${kind}/${jobId} ${r.status}: ${(await r.text()).slice(0, 200)}`);
     }
-    const json = (await r.json()) as { status: JobStatus; userMessage?: string | null };
+    const json = (await r.json()) as {
+      status: JobStatus;
+      userMessage?: string | null;
+      errorCode?: string;
+      errorMessage?: string;
+      [k: string]: unknown;
+    };
     if (level !== "debug") {
       log(runId, level, `${kind} ${jobId.slice(0, 8)} → ${json.status}`, { stage });
     }
     if (json.status === "COMPLETED") return;
     if (json.status === "FAILED" || json.status === "CANCELLED" || json.status === "CENSORED") {
+      // `userMessage` is often generic ("This job failed to complete. Please try again.").
+      // Surface every other field the response carries — errorCode / errorMessage and
+      // anything else — because that is where the real diagnostic lives.
+      const parts: string[] = [];
+      if (json.userMessage) parts.push(String(json.userMessage));
+      if (json.errorMessage) parts.push(String(json.errorMessage));
+      if (json.errorCode) parts.push(`(${json.errorCode})`);
+      const seen = new Set(["status", "userMessage", "errorMessage", "errorCode"]);
+      const extras: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(json)) if (!seen.has(k)) extras[k] = v;
+      if (Object.keys(extras).length > 0) parts.push(JSON.stringify(extras).slice(0, 250));
       throw new Error(
-        `69labs ${kind} job ${jobId} ${json.status}${json.userMessage ? `: ${json.userMessage}` : ""}`
+        `69labs ${kind} job ${jobId} ${json.status}${parts.length ? `: ${parts.join(" | ")}` : ""}`
       );
     }
     if (Date.now() - start > POLL_MAX_MS) {

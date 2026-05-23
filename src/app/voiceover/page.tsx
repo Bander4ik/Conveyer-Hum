@@ -215,7 +215,7 @@ export default function VoiceoverPage() {
             <label className="label">MiniMax voice id</label>
             <input
               className="input"
-              placeholder="e.g. English_CalmWoman"
+              placeholder="e.g. English_Comedian"
               value={customVoiceId}
               onChange={(e) => setCustomVoiceId(e.target.value)}
             />

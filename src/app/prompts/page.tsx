@@ -251,7 +251,7 @@ export default function PromptsPage() {
                   className="input"
                   value={editVoiceId}
                   onChange={(e) => setEditVoiceId(e.target.value)}
-                  placeholder="e.g. English_CalmWoman"
+                  placeholder="e.g. English_Comedian"
                   style={{ marginBottom: 10 }}
                 />
                 <label className="label" style={labelStyle}>
@@ -353,7 +353,7 @@ export default function PromptsPage() {
           </label>
           <input
             className="input"
-            placeholder="e.g. English_CalmWoman"
+            placeholder="e.g. English_Comedian"
             value={newVoiceId}
             onChange={(e) => setNewVoiceId(e.target.value)}
             style={{ marginBottom: 10 }}

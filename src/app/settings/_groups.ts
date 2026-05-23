@@ -88,8 +88,8 @@ export const ALL_GROUPS: Group[] = [
       {
         key: "TTS_VOICE_ID",
         label: "MiniMax voice",
-        desc: "The MiniMax voice used for narration. Use a catalog voice id (e.g. English_CalmWoman) or a cloned-voice id — browse them in your 69labs dashboard → MiniMax. A channel profile in Channels & Prompts can override this per channel.",
-        examples: "Catalog voice e.g. English_CalmWoman  ·  or a cloned-voice id from 69labs",
+        desc: "The MiniMax voice used for narration. Use a catalog voice id (e.g. English_Comedian) or a cloned-voice id — browse them in your 69labs dashboard → MiniMax. A channel profile in Channels & Prompts can override this per channel.",
+        examples: "Catalog voice e.g. English_Comedian  ·  or a cloned-voice id from 69labs",
       },
       {
         key: "TTS_MODEL",

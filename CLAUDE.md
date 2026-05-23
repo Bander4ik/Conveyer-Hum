@@ -91,7 +91,7 @@ Server-Sent Events (`/api/runs/[id]/logs`).
 |---|---|---|
 | **Google Gemini** | scene split | `GOOGLE_API_KEY`. Free tier fine. |
 | **69labs.vip** | Grok video + MiniMax voiceover | `LABS69_API_KEY` (covers both). Multi-key supported (newline/comma separated). Each key = 5 parallel video jobs. |
-| **MiniMax (via 69labs)** | TTS voiceover | `TTS_VOICE_ID` = catalog voice id e.g. `English_CalmWoman` (or a cloned voice). Model `speech-02-hd`. |
+| **MiniMax (via 69labs)** | TTS voiceover | `TTS_VOICE_ID` = catalog voice id e.g. `English_Comedian` (or a cloned voice). Model `speech-02-hd`. |
 | **Google Drive** | optional sync + reuse | OAuth2, callback `localhost:3000/api/gdrive/oauth/callback`. |
 
 ### Hard external constraints (don't fight these)
@@ -100,7 +100,7 @@ Server-Sent Events (`/api/runs/[id]/logs`).
   `duration` parameter for Grok — sending it (any format) returns HTTP 400.
   So scene-split prompts MUST keep each scene ≤ ~6s of narration.
 - **MiniMax voice ids are catalog strings, not UUIDs.** A MiniMax voice id looks
-  like `English_CalmWoman` (browse the catalog in the 69labs dashboard → MiniMax)
+  like `English_Comedian` (browse the catalog in the 69labs dashboard → MiniMax)
   or is a cloned-voice id. `tts.ts` sends it with `voiceProvider: "minimax"`.
 - **Windows Defender** truncates native `.node` binaries on `npm install`.
   `scripts/fix-native-binaries.mjs` (postinstall) restores them from a sibling

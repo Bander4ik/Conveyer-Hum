@@ -168,7 +168,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   // Switch to 69labs (edge/eleven) / elevenlabs / openai via /settings if needed.
   TTS_PROVIDER: "minimax",
   TTS_VOICE_PROVIDER: "edgetts",
-  TTS_VOICE_ID: "English_CalmWoman",
+  TTS_VOICE_ID: "English_Comedian",
   TTS_MODEL: "speech-02-hd",
   TTS_SPLIT_TYPE: "smart",
   TTS_LANGUAGE_BOOST: "English",
