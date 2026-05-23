@@ -293,7 +293,7 @@ export async function runPipeline(runId: string, script: string) {
           return { scene, imagePath: videoPath, videoPath, audio };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 200)}`, { stage: "pipeline" });
+          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
           return null;
         }
       })
@@ -401,7 +401,7 @@ export async function resumeRun(runId: string) {
           return { scene, imagePath: videoPath, videoPath, audio };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 200)}`, { stage: "pipeline" });
+          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
           return null;
         }
       })

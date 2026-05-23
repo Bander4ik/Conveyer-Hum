@@ -448,7 +448,7 @@ export async function pollJob(
       const seen = new Set(["status", "userMessage", "errorMessage", "errorCode"]);
       const extras: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(json)) if (!seen.has(k)) extras[k] = v;
-      if (Object.keys(extras).length > 0) parts.push(JSON.stringify(extras).slice(0, 250));
+      if (Object.keys(extras).length > 0) parts.push(JSON.stringify(extras).slice(0, 800));
       throw new Error(
         `69labs ${kind} job ${jobId} ${json.status}${parts.length ? `: ${parts.join(" | ")}` : ""}`
       );
