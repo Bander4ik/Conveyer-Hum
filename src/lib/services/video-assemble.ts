@@ -83,12 +83,22 @@ export async function assembleVideo(
   if (transitionSec > 0 && clipInfos.length >= 2) {
     // For large clip counts, split into N chunks and crossfade each chunk
     // in parallel before doing one final crossfade across the chunks.
-    // FFmpeg's chained xfade graph is serial (each xfade depends on the
-    // previous output), so a single 100-clip xfade can't use multiple cores.
-    // Running 4 chunk xfades in parallel saturates a modern CPU.
+    // Two-tier strategy:
+    //  - Small video (≤ MAX_CLIPS_PER_PASS): one monolithic xfade ffmpeg call.
+    //  - Large video: hierarchical xfade — cap each ffmpeg at MAX_CLIPS_PER_PASS
+    //    inputs and run them with bounded parallelism, then collapse the
+    //    intermediates in another pass. Repeats until ≤ MAX_CLIPS_PER_PASS remain.
+    //
+    // A monolithic xfade with hundreds of inputs blows past the system file-
+    // descriptor limit on macOS and Windows ("Resource temporarily unavailable" /
+    // EAGAIN) and ffmpeg crashes. The bounded-fan-in scheme keeps every ffmpeg
+    // process well under any reasonable per-process FD limit.
+    //
+    // `ASSEMBLE_XFADE_CHUNKS=1` forces the legacy monolithic path (useful for
+    // debugging — but it will crash on long videos).
     const xfadeChunks = Math.max(1, Number(getSetting("ASSEMBLE_XFADE_CHUNKS") || "4"));
     if (xfadeChunks > 1 && clipInfos.length >= xfadeChunks * 3) {
-      await concatWithCrossfadeChunked(runId, clipInfos, clipsDir, finalPath, transitionSec, fps, xfadeChunks);
+      await concatWithCrossfadeChunked(runId, clipInfos, clipsDir, finalPath, transitionSec, fps);
     } else {
       await concatWithCrossfade(clipInfos, finalPath, transitionSec, fps);
       log(runId, "info", `Crossfade ${transitionSec}s across ${clipInfos.length} scenes`, { stage: "assemble" });
@@ -327,16 +337,25 @@ function concatSimple(clipPaths: string[], clipsDir: string, finalPath: string):
 }
 
 /**
- * Chunked parallel concat-with-crossfade.
+ * Hierarchical chunked concat-with-crossfade.
  *
- * Splits clips into N groups, runs one FFmpeg per group in parallel to xfade
- * each group into an intermediate file, then xfades the intermediates into
- * the final output. This parallelizes what is otherwise a serial xfade chain
- * (FFmpeg's xfade filter is single-threaded per pair, and consecutive xfades
- * in one filter_complex are sequentially dependent).
+ * Two problems with a monolithic xfade across hundreds of clips:
+ *   1. FFmpeg's chained xfade graph is serial (each xfade depends on the
+ *      previous output), so a single 100-clip xfade can't use multiple cores.
+ *   2. Each ffmpeg input is an open file. Past ~150-200 inputs we blow the
+ *      system per-process file-descriptor limit (256 default on macOS, 512 on
+ *      Windows) and ffmpeg crashes with "Resource temporarily unavailable"
+ *      (EAGAIN) when binding the filtergraph.
  *
- * On an 8-core CPU, 4 chunks of ~25 clips each gives roughly a 3-4× speedup
- * on the assembly stage versus a monolithic 100-clip xfade chain.
+ * Strategy: cap each ffmpeg invocation at MAX_CLIPS_PER_PASS inputs, run them
+ * with bounded parallelism (MAX_PARALLEL), then collapse the intermediates
+ * the same way. Repeat the level until ≤ MAX_CLIPS_PER_PASS clips remain —
+ * that's the final pass that writes finalPath.
+ *
+ * Examples (MAX_CLIPS_PER_PASS=50):
+ *   100 clips  → L0: 2 chunks × 50 (2 parallel) → L1: 2 → final. 2 levels.
+ *   1600 clips → L0: 32 chunks × 50 (4 parallel) → L1: 32 ≤ 50 → final. 2 levels.
+ *   5000 clips → L0: 100 chunks × 50 → L1: 2 chunks × 50 → L2: 2 → final. 3 levels.
  */
 async function concatWithCrossfadeChunked(
   runId: string,
@@ -344,56 +363,94 @@ async function concatWithCrossfadeChunked(
   clipsDir: string,
   finalPath: string,
   fadeDur: number,
-  fps: number,
-  chunkCount: number
+  fps: number
 ): Promise<void> {
-  // Distribute clips evenly across chunks (no chunk smaller than ~floor(N/chunks))
-  const total = clips.length;
-  const chunks: { path: string; durationSec: number }[][] = [];
-  const baseSize = Math.floor(total / chunkCount);
-  const extra = total % chunkCount;
-  let cursor = 0;
-  for (let i = 0; i < chunkCount; i++) {
-    const size = baseSize + (i < extra ? 1 : 0);
-    if (size === 0) continue;
-    chunks.push(clips.slice(cursor, cursor + size));
-    cursor += size;
+  const MAX_CLIPS_PER_PASS = Math.max(
+    2,
+    Number(getSetting("ASSEMBLE_XFADE_MAX_CLIPS_PER_PASS") || "50")
+  );
+  const MAX_PARALLEL = Math.max(
+    1,
+    Number(getSetting("ASSEMBLE_CONCURRENCY") || "4")
+  );
+
+  let current = clips;
+  let level = 0;
+  const intermediateFiles: string[] = [];
+
+  // Keep collapsing until current.length fits in one final ffmpeg call.
+  while (current.length > MAX_CLIPS_PER_PASS) {
+    // Distribute clips evenly across chunks so no chunk is wildly bigger.
+    const chunkCount = Math.ceil(current.length / MAX_CLIPS_PER_PASS);
+    const baseSize = Math.floor(current.length / chunkCount);
+    const extra = current.length % chunkCount;
+
+    const chunks: { path: string; durationSec: number }[][] = [];
+    let cursor = 0;
+    for (let i = 0; i < chunkCount; i++) {
+      const size = baseSize + (i < extra ? 1 : 0);
+      chunks.push(current.slice(cursor, cursor + size));
+      cursor += size;
+    }
+
+    log(
+      runId,
+      "info",
+      `xfade L${level}: ${current.length} clips → ${chunkCount} chunks (~${baseSize}${extra > 0 ? "-" + (baseSize + 1) : ""} each), ` +
+        `${Math.min(MAX_PARALLEL, chunkCount)} in parallel`,
+      { stage: "assemble" }
+    );
+
+    const limit = pLimit(MAX_PARALLEL);
+    const nextLevel: { path: string; durationSec: number }[] = await Promise.all(
+      chunks.map((chunkClips, idx) =>
+        limit(async () => {
+          // Single-clip chunk: pass through, no ffmpeg pass needed.
+          if (chunkClips.length === 1) return chunkClips[0];
+          const chunkPath = path.join(
+            clipsDir,
+            `xfade_L${level}_${String(idx).padStart(3, "0")}.mp4`
+          );
+          await concatWithCrossfade(chunkClips, chunkPath, fadeDur, fps);
+          intermediateFiles.push(chunkPath);
+          // Chunk duration = sum(clip durations) − (N−1) × fadeDur (each xfade overlaps)
+          const chunkDuration =
+            chunkClips.reduce((s, c) => s + c.durationSec, 0) -
+            (chunkClips.length - 1) * fadeDur;
+          log(
+            runId,
+            "info",
+            `xfade L${level} #${idx}: ${chunkClips.length} clips → ${chunkDuration.toFixed(1)}s`,
+            { stage: "assemble" }
+          );
+          return { path: chunkPath, durationSec: chunkDuration };
+        })
+      )
+    );
+
+    current = nextLevel;
+    level++;
   }
 
+  // Final pass — `current` now has ≤ MAX_CLIPS_PER_PASS clips.
   log(
     runId,
     "info",
-    `Chunked xfade: ${chunks.length} chunks × ~${baseSize}+ clips, running in parallel`,
+    `xfade final pass: ${current.length} ${current.length === 1 ? "clip" : "clips"} → final.mp4`,
     { stage: "assemble" }
   );
-
-  // Build each chunk in parallel
-  const chunkOutputs: { path: string; durationSec: number }[] = await Promise.all(
-    chunks.map(async (chunkClips, idx) => {
-      const chunkPath = path.join(clipsDir, `chunk_${String(idx).padStart(2, "0")}.mp4`);
-      await concatWithCrossfade(chunkClips, chunkPath, fadeDur, fps);
-      // Total duration of a chunk = sum(clip durations) - (N-1) × fadeDur (each xfade overlaps)
-      const chunkDuration =
-        chunkClips.reduce((s, c) => s + c.durationSec, 0) - (chunkClips.length - 1) * fadeDur;
-      log(
-        runId,
-        "info",
-        `Chunk #${idx}: ${chunkClips.length} clips → ${chunkPath} (${chunkDuration.toFixed(1)}s)`,
-        { stage: "assemble" }
-      );
-      return { path: chunkPath, durationSec: chunkDuration };
-    })
-  );
-
-  log(runId, "info", `Final pass: xfade across ${chunkOutputs.length} chunks`, { stage: "assemble" });
-
-  // Final xfade pass across chunk outputs
-  await concatWithCrossfade(chunkOutputs, finalPath, fadeDur, fps);
+  if (current.length === 1) {
+    // Only one clip survived (rare — happens when total ≤ MAX_CLIPS_PER_PASS-1
+    // and the caller still chose chunked path, OR after a chain of pass-throughs).
+    fs.copyFileSync(current[0].path, finalPath);
+  } else {
+    await concatWithCrossfade(current, finalPath, fadeDur, fps);
+  }
 
   // Cleanup intermediate chunk files
-  for (const c of chunkOutputs) {
+  for (const f of intermediateFiles) {
     try {
-      fs.unlinkSync(c.path);
+      fs.unlinkSync(f);
     } catch {}
   }
 }
