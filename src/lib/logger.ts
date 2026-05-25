@@ -9,6 +9,14 @@ const getLogsStmt = db.prepare(
   "SELECT id, ts, level, stage, message, data_json FROM run_logs WHERE run_id = ? ORDER BY id ASC"
 );
 
+// Tail variant — returns the last N logs in chronological order. Avoids
+// flushing tens of thousands of rows over SSE on a long-video run page load,
+// which otherwise pegs both the Node side (JSON encoding) and the browser
+// side (DOM rendering).
+const getLogsTailStmt = db.prepare(
+  "SELECT id, ts, level, stage, message, data_json FROM run_logs WHERE run_id = ? ORDER BY id DESC LIMIT ?"
+);
+
 export type LogLevel = "info" | "warn" | "error" | "success" | "debug";
 
 export interface LogEntry {
@@ -61,17 +69,16 @@ export function subscribe(runId: string, handler: (e: LogEntry) => void) {
   return () => bus.off(ev, handler);
 }
 
-export function getLogs(runId: string): LogEntry[] {
-  type Row = {
-    id: number;
-    ts: string;
-    level: LogLevel;
-    stage: string | null;
-    message: string;
-    data_json: string | null;
-  };
-  const rows = getLogsStmt.all(runId) as Row[];
-  return rows.map((r) => ({
+type LogRow = {
+  id: number;
+  ts: string;
+  level: LogLevel;
+  stage: string | null;
+  message: string;
+  data_json: string | null;
+};
+function rowToEntry(runId: string, r: LogRow): LogEntry {
+  return {
     id: r.id,
     ts: r.ts,
     runId,
@@ -79,5 +86,21 @@ export function getLogs(runId: string): LogEntry[] {
     stage: r.stage ?? undefined,
     message: r.message,
     data: r.data_json ? JSON.parse(r.data_json) : undefined,
-  }));
+  };
+}
+
+export function getLogs(runId: string): LogEntry[] {
+  const rows = getLogsStmt.all(runId) as LogRow[];
+  return rows.map((r) => rowToEntry(runId, r));
+}
+
+/**
+ * Last `limit` log entries for a run, oldest-first.
+ * Used by the SSE log stream so the initial flush stays small on long-video
+ * runs (10 000+ rows would otherwise lock the run page for several seconds).
+ */
+export function getLogsTail(runId: string, limit: number): LogEntry[] {
+  const rows = getLogsTailStmt.all(runId, limit) as LogRow[];
+  // SQL returned DESC for the tail-window; reverse back to chronological order.
+  return rows.reverse().map((r) => rowToEntry(runId, r));
 }

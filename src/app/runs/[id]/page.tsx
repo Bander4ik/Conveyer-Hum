@@ -41,6 +41,12 @@ interface DriveStatus {
   rawClipsRemainCount: number;
 }
 
+// Sliding window cap on the visible log buffer. A 1 000+ scene run can
+// generate 10 000+ log rows; keeping every single one in React state pegs the
+// browser (DOM rendering + reconciliation on each new SSE event). 500 is
+// enough for the live-activity feed; the full history lives in run_logs.
+const LOG_DISPLAY_CAP = 500;
+
 export default function RunPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -55,7 +61,10 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     const es = new EventSource(`/api/runs/${id}/logs`);
     es.addEventListener("log", (ev) => {
       const e = JSON.parse((ev as MessageEvent).data) as LogEntry;
-      setLogs((prev) => [...prev, e]);
+      setLogs((prev) => {
+        const next = [...prev, e];
+        return next.length > LOG_DISPLAY_CAP ? next.slice(-LOG_DISPLAY_CAP) : next;
+      });
     });
     return () => es.close();
   }, [id]);

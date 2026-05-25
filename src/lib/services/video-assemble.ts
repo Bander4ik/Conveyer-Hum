@@ -369,10 +369,25 @@ async function concatWithCrossfadeChunked(
     2,
     Number(getSetting("ASSEMBLE_XFADE_MAX_CLIPS_PER_PASS") || "50")
   );
-  const MAX_PARALLEL = Math.max(
+  const baseParallel = Math.max(
     1,
     Number(getSetting("ASSEMBLE_CONCURRENCY") || "4")
   );
+  // RAM-aware throttle: each ffmpeg holds ~MAX_CLIPS_PER_PASS inputs in memory
+  // plus buffered frames. On a 16-GB laptop, 4 parallel ffmpegs each pulling
+  // 50 inputs can spill into swap and freeze the whole machine — which feels
+  // to the user like "the whole app slowed down". For huge videos (where the
+  // pain is real) cap parallelism at 2 even if ASSEMBLE_CONCURRENCY is higher.
+  const isLargeVideo = clips.length >= 500;
+  const MAX_PARALLEL = isLargeVideo ? Math.min(baseParallel, 2) : baseParallel;
+  if (isLargeVideo && baseParallel > MAX_PARALLEL) {
+    log(
+      runId,
+      "info",
+      `Large video (${clips.length} clips) — throttling assemble concurrency ${baseParallel} → ${MAX_PARALLEL} to keep RAM usage bounded`,
+      { stage: "assemble" }
+    );
+  }
 
   let current = clips;
   let level = 0;

@@ -1,9 +1,18 @@
-import { getLogs, subscribe } from "@/lib/logger";
+import { getLogsTail, subscribe } from "@/lib/logger";
 import { ensureInit } from "@/lib/init";
 
 /**
+ * Initial history window for a run-page load. Past this many entries the
+ * browser starts choking on DOM rendering and JSON parsing — on a 1 000+ scene
+ * video the full log can easily be 10 000+ rows. The live SSE keeps appending
+ * after this initial flush, so live activity is still visible immediately.
+ * Older entries are still in `run_logs` — open the DB or run folder to inspect.
+ */
+const INITIAL_HISTORY_LIMIT = 500;
+
+/**
  * SSE stream of logs for a specific run.
- * First flushes historical logs, then subscribes to live events.
+ * First flushes the recent history window, then subscribes to live events.
  */
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   ensureInit();
@@ -17,8 +26,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
 
-      // 1. history
-      for (const log of getLogs(id)) send("log", log);
+      // 1. history — capped to the recent window to keep the page responsive
+      for (const log of getLogsTail(id, INITIAL_HISTORY_LIMIT)) send("log", log);
       send("ready", { runId: id });
 
       // 2. live
