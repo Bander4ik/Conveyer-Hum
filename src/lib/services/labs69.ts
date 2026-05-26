@@ -114,11 +114,18 @@ function keyFor(jobId: string): string {
 }
 
 /**
- * POST helper. Transparently waits out HTTP 429 (rate limit / hourly cap)
- * instead of failing the run: 69labs caps throughput per hour, so an
- * overnight batch must be able to sleep through the cap and continue.
- * Honors a `Retry-After` header when present, otherwise escalates the wait.
- * Non-429 errors propagate immediately.
+ * POST helper with two kinds of automatic wait/retry instead of failing the run:
+ *
+ *   • 429 Too Many Requests — short-term rate spike. Honor `Retry-After` when
+ *     given; otherwise back off 20s → 40s → … capped at 10 min. Up to 40 retries.
+ *
+ *   • 403 + "Hourly credit limit exceeded" — the plan's per-hour credit bucket
+ *     emptied. Wait ~10 min for the hour to roll over, then retry. Up to 18
+ *     retries (≈ 3 hours of total waiting). Other 403s (bad key, etc) propagate
+ *     immediately so genuine auth failures don't hang the pipeline.
+ *
+ * Both paths log the wait into the run log so the user sees a "waiting"
+ * message instead of a silent hang.
  */
 async function postJsonWithKey<T>(
   path: string,
@@ -127,7 +134,9 @@ async function postJsonWithKey<T>(
   ctx?: { runId: string; stage: string }
 ): Promise<T> {
   const MAX_RATE_RETRIES = 40;
+  const MAX_CREDIT_RETRIES = 18;
   let rateRetry = 0;
+  let creditRetry = 0;
   while (true) {
     const r = await fetch(`${BASE}${path}`, {
       method: "POST",
@@ -154,6 +163,31 @@ async function postJsonWithKey<T>(
       await sleep(waitMs);
       continue;
     }
+
+    if (r.status === 403) {
+      const errText = await r.text();
+      const isCreditLimit = /credit limit|hourly|quota/i.test(errText);
+      if (isCreditLimit && creditRetry < MAX_CREDIT_RETRIES) {
+        creditRetry++;
+        const retryAfter = Number(r.headers.get("retry-after"));
+        const waitMs =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, 30 * 60_000)
+            : 10 * 60_000; // 10 min — typical hourly bucket roll-over window
+        if (ctx) {
+          log(
+            ctx.runId,
+            "warn",
+            `69labs hourly credit limit (403) — waiting ${Math.round(waitMs / 60_000)} min for the hourly window to reset, then retrying (${creditRetry}/${MAX_CREDIT_RETRIES})`,
+            { stage: ctx.stage }
+          );
+        }
+        await sleep(waitMs);
+        continue;
+      }
+      throw new Error(`69labs POST ${path} 403: ${errText.slice(0, 400)}`);
+    }
+
     throw new Error(`69labs POST ${path} ${r.status}: ${(await r.text()).slice(0, 400)}`);
   }
 }
