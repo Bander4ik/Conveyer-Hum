@@ -271,32 +271,48 @@ export async function runPipeline(runId: string, script: string) {
 
     // 3. Per scene: TTS + Grok text-to-video, interleaved, concurrency-limited.
     const { keyCount, ttsPerKey, animPerKey, limitTts, limitAnim } = makeLimiters();
+    // Worker pool bounds peak RAM by capping how many scene closures + plimit
+    // queue entries live at once. The plimit limiters still control real API
+    // concurrency; this only stops the heap from holding 1 500 pending
+    // closures on long runs.
+    const WORKER_COUNT = Math.max(20, keyCount * 5);
     log(
       runId,
       "info",
-      `Generating ${scenes.length} scenes (video-only). Keys: ${keyCount} · Concurrency per key×keys: TTS=${ttsPerKey}×${keyCount}, video=${animPerKey}×${keyCount}. Provider: ${animProvider}`,
+      `Generating ${scenes.length} scenes (video-only). Keys: ${keyCount} · Concurrency per key×keys: TTS=${ttsPerKey}×${keyCount}, video=${animPerKey}×${keyCount}. Provider: ${animProvider} · workers=${WORKER_COUNT}`,
       { stage: "pipeline" }
     );
 
-    const settled: SceneResult[] = await Promise.all(
-      scenes.map(async (scene): Promise<SceneResult> => {
-        try {
-          checkCancelled(runId);
-          const reuseFileId = reuseMap[String(scene.index)];
-          const [audio, videoPath] = await Promise.all([
-            limitTts(() => synthesizeScene(runId, scene, audioDir, { voiceOverride })),
-            reuseFileId
-              ? downloadReusedClip(runId, scene, reuseFileId, animDir)
-              : limitAnim(() => animateScene(runId, scene, null, animDir, { motionOverride })),
-          ]);
-          if (!videoPath) throw new Error(`Scene #${scene.index} produced no video clip`);
-          return { scene, imagePath: videoPath, videoPath, audio };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
-          return null;
-        }
-      })
+    const processScene = async (scene: Scene): Promise<SceneResult> => {
+      try {
+        checkCancelled(runId);
+        const reuseFileId = reuseMap[String(scene.index)];
+        const [audio, videoPath] = await Promise.all([
+          limitTts(() => synthesizeScene(runId, scene, audioDir, { voiceOverride })),
+          reuseFileId
+            ? downloadReusedClip(runId, scene, reuseFileId, animDir)
+            : limitAnim(() => animateScene(runId, scene, null, animDir, { motionOverride })),
+        ]);
+        if (!videoPath) throw new Error(`Scene #${scene.index} produced no video clip`);
+        return { scene, imagePath: videoPath, videoPath, audio };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
+        return null;
+      }
+    };
+
+    const settled: SceneResult[] = new Array(scenes.length).fill(null);
+    let nextSceneIdx = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = nextSceneIdx++;
+        if (idx >= scenes.length) return;
+        settled[idx] = await processScene(scenes[idx]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(WORKER_COUNT, scenes.length) }, () => worker())
     );
 
     const sceneAssets = settled.filter((x): x is AssembleInput => x !== null);
@@ -367,44 +383,57 @@ export async function resumeRun(runId: string) {
       { stage: "pipeline" }
     );
 
-    const { limitTts, limitAnim } = makeLimiters();
+    const { keyCount, limitTts, limitAnim } = makeLimiters();
+    const WORKER_COUNT = Math.max(20, keyCount * 5);
 
-    const settled: SceneResult[] = await Promise.all(
-      scenes.map(async (scene): Promise<SceneResult> => {
-        try {
-          checkCancelled(runId);
-          const aPath = audioPathFor(audioDir, scene.index);
-          const vPath = videoPathFor(animDir, scene.index);
+    const processScene = async (scene: Scene): Promise<SceneResult> => {
+      try {
+        checkCancelled(runId);
+        const aPath = audioPathFor(audioDir, scene.index);
+        const vPath = videoPathFor(animDir, scene.index);
 
-          // Audio: reuse the file on disk, else regenerate via MiniMax.
-          let audio: TtsResult;
-          if (fileReady(aPath)) {
-            audio = { filePath: aPath, durationSec: await probeDurationSafe(aPath) };
-          } else {
-            audio = await limitTts(() => synthesizeScene(runId, scene, audioDir, { voiceOverride }));
-          }
-
-          // Video: reuse the clip on disk, else regenerate via Grok (or reuse
-          // map → download from Drive).
-          let videoPath: string;
-          if (fileReady(vPath)) {
-            videoPath = vPath;
-          } else {
-            const reuseFileId = reuseMap[String(scene.index)];
-            const generated = reuseFileId
-              ? await downloadReusedClip(runId, scene, reuseFileId, animDir)
-              : await limitAnim(() => animateScene(runId, scene, null, animDir, { motionOverride }));
-            if (!generated) throw new Error(`Scene #${scene.index} produced no video clip`);
-            videoPath = generated;
-          }
-
-          return { scene, imagePath: videoPath, videoPath, audio };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
-          return null;
+        // Audio: reuse the file on disk, else regenerate via MiniMax.
+        let audio: TtsResult;
+        if (fileReady(aPath)) {
+          audio = { filePath: aPath, durationSec: await probeDurationSafe(aPath) };
+        } else {
+          audio = await limitTts(() => synthesizeScene(runId, scene, audioDir, { voiceOverride }));
         }
-      })
+
+        // Video: reuse the clip on disk, else regenerate via Grok (or reuse
+        // map → download from Drive).
+        let videoPath: string;
+        if (fileReady(vPath)) {
+          videoPath = vPath;
+        } else {
+          const reuseFileId = reuseMap[String(scene.index)];
+          const generated = reuseFileId
+            ? await downloadReusedClip(runId, scene, reuseFileId, animDir)
+            : await limitAnim(() => animateScene(runId, scene, null, animDir, { motionOverride }));
+          if (!generated) throw new Error(`Scene #${scene.index} produced no video clip`);
+          videoPath = generated;
+        }
+
+        return { scene, imagePath: videoPath, videoPath, audio };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(runId, "error", `Scene #${scene.index} failed: ${msg.slice(0, 1500)}`, { stage: "pipeline" });
+        return null;
+      }
+    };
+
+    // Worker pool — same bounded-RAM pattern as runPipeline.
+    const settled: SceneResult[] = new Array(scenes.length).fill(null);
+    let nextSceneIdx = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = nextSceneIdx++;
+        if (idx >= scenes.length) return;
+        settled[idx] = await processScene(scenes[idx]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(WORKER_COUNT, scenes.length) }, () => worker())
     );
 
     const sceneAssets = settled.filter((x): x is AssembleInput => x !== null);
