@@ -104,6 +104,29 @@ function authHeadersFor(key: string): Record<string, string> {
   };
 }
 
+// Node's global fetch has NO default timeout. If 69labs holds the connection
+// open (which happens around credit-cap rollovers and transient backend stalls)
+// the call hangs forever — the outer pollJob timeout never gets a chance to
+// fire because it's checked between fetches, not during them. This wraps every
+// HTTP call with an AbortController so the worst case is a 60-second hang per
+// request (5 min for downloads), then a clean throw the outer retry can catch.
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+
+async function fetchWithTimeout(
+  input: string,
+  init?: RequestInit,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...(init ?? {}), signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 function keyFor(jobId: string): string {
   const k = jobKeyMap.get(jobId);
   if (k) return k;
@@ -138,7 +161,7 @@ async function postJsonWithKey<T>(
   let rateRetry = 0;
   let creditRetry = 0;
   while (true) {
-    const r = await fetch(`${BASE}${path}`, {
+    const r = await fetchWithTimeout(`${BASE}${path}`, {
       method: "POST",
       headers: authHeadersFor(key),
       body: JSON.stringify(body),
@@ -308,7 +331,7 @@ export async function listMinimaxVoices(
   if (opts.language?.trim()) params.set("language", opts.language.trim());
   if (opts.gender?.trim()) params.set("gender", opts.gender.trim());
 
-  const r = await fetch(`${BASE}/tts/minimax/voices?${params.toString()}`, {
+  const r = await fetchWithTimeout(`${BASE}/tts/minimax/voices?${params.toString()}`, {
     headers: { Authorization: `Bearer ${keys[0]}` },
   });
   if (!r.ok) {
@@ -450,7 +473,7 @@ export async function pollJob(
   const key = keyFor(jobId);
   const start = Date.now();
   while (true) {
-    const r = await fetch(`${BASE}/${kind}/status/${jobId}`, { headers: authHeadersFor(key) });
+    const r = await fetchWithTimeout(`${BASE}/${kind}/status/${jobId}`, { headers: authHeadersFor(key) });
     if (!r.ok) {
       // A 429 on the status endpoint is transient — back off and keep polling
       // rather than failing the job.
@@ -498,7 +521,7 @@ export async function pollJob(
 export async function cancelJob(kind: JobKind, jobId: string): Promise<boolean> {
   const key = keyFor(jobId);
   try {
-    const r = await fetch(`${BASE}/${kind}/cancel/${jobId}`, {
+    const r = await fetchWithTimeout(`${BASE}/${kind}/cancel/${jobId}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}` },
     });
@@ -514,10 +537,11 @@ export async function cancelJob(kind: JobKind, jobId: string): Promise<boolean> 
 export async function downloadJob(kind: JobKind, jobId: string, outPath: string): Promise<void> {
   const key = keyFor(jobId);
   try {
-    const r = await fetch(`${BASE}/${kind}/download/${jobId}`, {
-      headers: { Authorization: `Bearer ${key}` },
-      redirect: "follow",
-    });
+    const r = await fetchWithTimeout(
+      `${BASE}/${kind}/download/${jobId}`,
+      { headers: { Authorization: `Bearer ${key}` }, redirect: "follow" },
+      DOWNLOAD_TIMEOUT_MS
+    );
     if (!r.ok) {
       throw new Error(`69labs download ${kind}/${jobId} ${r.status}: ${(await r.text()).slice(0, 200)}`);
     }
