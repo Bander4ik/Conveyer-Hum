@@ -41,6 +41,13 @@ For EACH scene, return a JSON object with:
   CAMERA + STYLE (this is just SUBSTANCE — style suffix is appended later):
   • Real-world cinematography vocabulary: "slow dolly across...", "macro close-up on...", "overhead shot of...", "golden-hour wide shot of...", "lens flare through olive branches", "shallow depth of field", "35mm documentary feel".
   • Describe MOTION explicitly — Grok generates animated clips, so include subtle camera or subject motion (slow push-in, gentle parallax, steam rising, hands moving, sunlight shifting).
+  VISUAL CONTINUITY (critical — read carefully):
+  • Each scene generates a SEPARATE 6-second clip. Without active effort, every clip break is a jarring cut to a totally unrelated world (Sardinian village → Loma Linda farm → cellular microscope) and the viewer feels it. You see the FULL script in one call — use that to bind consecutive scenes together.
+  • CARRY FORWARD the time of day, lighting, and color palette across consecutive scenes UNLESS the narration explicitly moves to a different time ("next morning", "by nightfall", "later that year").
+  • CARRY FORWARD the setting / location when the script's idea hasn't moved on — if three consecutive sentences all describe the same subject (one fisherman's day, one kitchen, one terraced vineyard), keep them in the SAME place, just at different angles or distances (wide → close-up → over-the-shoulder → detail).
+  • Use SUBTLE PROGRESSION between scenes: different angle of the same place, a close-up after a wide, slow time-of-day drift, the camera moving through one continuous world.
+  • RESET the visual world ONLY when the script explicitly shifts subject — a new chapter, a new location, a new theme. Then a fresh setting is welcome (the viewer feels the narrative turn rather than a glitch).
+  • Think "the camera is walking through ONE coherent world", not "each scene is a standalone postcard pasted next to the last".
   PROHIBITED:
   • No text overlays, captions, logos, watermarks, brand names visible in frame.
   • No cartoon/anime/illustrative/painterly styling.
